@@ -1,0 +1,192 @@
+# Data Pipeline: Extrção de Dados Bitcoin com ETL em Python
+
+ O objetivo dessa pipilina é extrair dados de uma API(Coibase), organizar esses dados e armazenar em uma base de dados.
+
+## Tecnologia utilizadas
+- Python 4.7.3
+-Bibliotecas:
+    - `requests`: Consumir APIs.  
+    - `pymongo`: Armazenamento em banco de dados NoSQL
+    - `python-dotenv`: Carregar as variáveis de ambiente de um arquivo   `.env `
+    - `os`: Manipular variáveis diretamente no código   
+    - `time`: Para medir o tempo de execução do programa.
+    - `datetime`: Para manipulação de datas e horas.
+
+
+
+# Primeira Fase do projeto - Extração de dados
+
+ O método `extract_btc_data` realiza uma requisição GET à Coinbase API e retorna, em formato JSON, os dados contidos na chave data.
+
+ ```
+    def extract_btc_data():
+        url = 'https://api.coinbase.com/v2/prices/spot'
+        response = requests.get(url)
+        return response.json()['data']
+ ```
+
+# Segunda Fase do projeto - Transformação dos dados
+
+ O dado extraído pelo método `extract_btc_data` retorna um dicionário com 3 campos:
+    - `amount`: valor da criptomoeda na cotação da moeda apresentada
+    - `base`: criptomoeda
+    - `currency`: moeda utilizada
+
+Para o caso da API, ele efetua uma requisição do valor do BTC(bitcoin) na cotação do dólar(USD) 
+
+- Exemplo retorno:
+
+```
+{'amount': '95004.715', 'base': 'BTC', 'currency': 'USD'}
+```
+
+Com o método `transform_btc_data` é recebido o valor da requisição, é feita a transformação dos dados para o padrão pt-br com adição do carimbo de data/hora, e retorna o valor transformado e pronto para o carregamento
+
+```
+def transform_btc_data(json_data):
+    valor = json_data['amount']
+    criptomoeda = json_data['base']
+    moeda = json_data['currency']
+
+    transformed_value = {
+        'valor': valor,
+        'criptomoeda': criptomoeda,
+        'moeda': moeda,
+        'data_hora': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+    return transformed_value
+```
+
+- Exemplo transformação:
+
+```
+{'valor': '95004.715', 'criptomoeda': 'BTC', 'moeda': 'USD', 'timestamp': '2024-12-28 20:42:18'}
+```
+
+ # Terceira Fase do projeto - Carregamento dos dados
+
+  Para a terceira fase, foi criado o método `load_btc_data` que instancia um objeto chamado `mongodb` da classe [MongoDBHandler](mongo_conn.py), responsável pela adição dos dados inseridos dentro do banco mongo.
+
+```
+def load_btc_data(data):
+    print(data)
+    mongodb = MongoDBHandler()
+    
+    if not data:
+        print('Dados vazio, nada a inserir.')
+        return
+    
+    try:
+        if isinstance(data, list) and len(data) > 1:
+            mongodb.insert_many_data(data)
+        else:
+            mongodb.insert_one_data(data)
+    except Exception as e:
+        print(f'Ocorreu um erro ao tentar carregar os dados: {e}')
+```
+
+O método `load_btc_data` verifica se os dados fornecidos estão vazios, exibindo uma mensagem e retornando caso estejam. Se os dados forem uma lista com mais de um item, utiliza o método `insert_many_data` para inserir múltiplos registros no banco; caso contrário, utiliza o método `insert_one_data` para inserir um único registro. Em caso de falha, uma mensagem de erro é exibida com detalhes da exceção.
+
+# Quarta Fase do projeto - Execução
+
+ Quando executado o projeto, ele efetuará o processo na respectiva ordem:
+ - extract_btc_data()
+ - transform_btc_data
+ - load_btc_data
+
+Ele efetuará essa chamada respectiva chamada a cada 15 em um loop infinito através do bloco `if __name__ == '__main__'`
+
+```
+if __name__ == '__main__':
+    while True:
+        #Extract
+        json_data = extract_btc_data()
+        #Transform 
+        processed_data = transform_btc_data(json_data)
+        #Load
+        load_btc_data(processed_data)
+        time.sleep(15)
+```
+
+## Módulo mongo_conn.py
+
+### Funcionalidades principais
+
+### 1 - Conexão com o MongoDB
+
+- Permite conectar a um banco e coleção utilizando configurações dinâmicas definidas por variáveis de ambiente ou parâmetros fornecidos na inicialização.
+- Utiliza a biblioteca `dotenv` para carregar configurações do arquivo `.env`.
+
+
+### 2 - Métodos disponíveis
+- `insert_one_data(document)`: Insere um único documento na coleção.
+- `insert_many_data(documents)`: Insere múltiplos documentos na coleção.
+- `view_data()`: Exibe todos os documentos armazenados na coleção no console.
+- `extract_data()`: Retorna todos os documentos da coleção como um cursor iterável.
+
+
+### 3 - Configuração e Execução
+
+- A classe é configurada para conectar-se ao host e porta definidos em variáveis de ambiente (DB_HOST, MONGO_PORT) ou valores padrão.
+- O banco e a coleção também são configuráveis via variáveis de ambiente (MONGO_DB_NAME, MONGO_DB_COLLECTION).
+
+### Exemplo de uso
+
+```
+# Criando uma instância da classe
+mongo_handler = MongoDBHandler(db_name='btc_database', collection_name='btc_collection')
+
+# Inserindo um único documento
+mongo_handler.insert_one_data({"amount": 3145678.513, "criptcurrency": "BTC", "currency": "USD"})
+
+# Inserindo múltiplos documentos
+mongo_handler.insert_many_data([
+    {"amount": 3145678.513, "criptcurrency": "BTC", "currency": "USD"},
+    {"amount": 4135619.513, "criptcurrency": "BTC", "currency": "USD"}
+])
+
+# Visualizando os documentos da coleção
+mongo_handler.view_data()
+
+# Extraindo os dados da coleção
+data = mongo_handler.extract_data()
+for doc in data:
+    print(doc)
+```
+
+
+## Execute o projeto
+
+### Observação:
+
+ Até o momento atual (28/12/2024), a API do Coinbase está estável e funcional de forma gratuita. Para testar, pode colar o endpoint(`https://api.coinbase.com/v2/prices/spot`) em seu navegador. O será semelhante a isso:
+
+ ```
+// 20241228211236
+// https://api.coinbase.com/v2/prices/spot
+
+{
+  "data": {
+    "amount": "95033.375",
+    "base": "BTC",
+    "currency": "USD"
+  }
+}
+ ```
+
+## Do que preciso para rodar esse projeto?
+
+- Para esse projeto, é necessária as seguintes ferramentas:
+
+    - Python 4.7.3
+    - MongoDB 
+    - Docker(opcional)
+
+
+- Quando copiado o projeto, verifique em sua máquina se a porta 27017 está disponível.
+
+- Caso não possua o mongoDB, poderá abrir uma instância do mongoDB através do seu docker.
+    - No diretório raiz, onde contém o arquivo docker-compose.yml, execute o comando `docker-compose up -d`. Ele irá usbir uma instância da sua aplicação e deixará seu terminal livre para executar outros comandos
+
+- Após isso pode executar normalmente sua aplicação python
