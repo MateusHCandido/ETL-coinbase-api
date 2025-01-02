@@ -1,159 +1,148 @@
 # Data Pipeline: Extrção de Dados Bitcoin com ETL em Python
 
- O objetivo dessa pipilina é extrair dados de uma API(Coibase), organizar esses dados e armazenar em uma base de dados.
+ O objetivo dessa pipilina é extrair dados de uma API(Coibase), organizar esses dados e armazenar em uma base de dados utilizando o processo ETL através do Apache Airflow.
 
 ## Tecnologia utilizadas
-- Python 4.7.3
--Bibliotecas:
-    - `requests`: Consumir APIs.  
-    - `pymongo`: Armazenamento em banco de dados NoSQL
-    - `python-dotenv`: Carregar as variáveis de ambiente de um arquivo   `.env `
-    - `os`: Manipular variáveis diretamente no código   
-    - `time`: Para medir o tempo de execução do programa.
+- `Python` 4.7.3
+- `Docker`
+- Bibliotecas: 
     - `datetime`: Para manipulação de datas e horas.
+- Frameworks:
+    - `airflow`: Orquestrador de pipelines
+        - apache-airflow-providers-postgres
+        - apache-airflow-providers-http
+
+Obs: Para essa versão do projeto, é necessário a utilização do docker para poder subir as instâncias do aiflow e seu servidor web.
 
 
 
-# Primeira Fase do projeto - Extração de dados
+# Primeira Fase do projeto - Criação da DAG
 
- O método `extract_btc_data` realiza uma requisição GET à Coinbase API e retorna, em formato JSON, os dados contidos na chave data.
+ A DAG será um módulo com uma configuração determinada para objetivar sua função no airflow. Dentro da DAG serão distribuídas tarefas, em que cada tarefa consiste em uma etapa no pipeline da dados.
+
 
  ```
-    def extract_btc_data():
-        url = 'https://api.coinbase.com/v2/prices/spot'
-        response = requests.get(url)
-        return response.json()['data']
+    dag = DAG('extract_data_coinbase_api', #DAG name
+          'extraction of data by Coinbase API', #Description
+          start_date=datetime(2024, 12, 29),
+          schedule_interval=timedelta(seconds=15),  
+          catchup=False) #Avoid retroactive execution
  ```
 
-# Segunda Fase do projeto - Transformação dos dados
+# Segunda Fase do projeto - Criação das tarefas
 
- O dado extraído pelo método `extract_btc_data` retorna um dicionário com 3 campos:
-    - `amount`: valor da criptomoeda na cotação da moeda apresentada
-    - `base`: criptomoeda
-    - `currency`: moeda utilizada
+## Tarefa 1 - extract_btc_data_task
 
-Para o caso da API, ele efetua uma requisição do valor do BTC(bitcoin) na cotação do dólar(USD) 
-
-- Exemplo retorno:
+ Efetua a extração dos dados da API Coinbase
 
 ```
-{'amount': '95004.715', 'base': 'BTC', 'currency': 'USD'}
-```
+    extract_btc_data_task = SimpleHttpOperator(
+    task_id='extract_btc_data',
+    http_conn_id='coinbase_api', #Connection configured in airflow
+    endpoint='v2/prices/spot',
+    method='GET',
+    response_filter=lambda response: response.json()['data'],
+    log_response=True,
+    dag=dag
+    )
+ ```
 
-Com o método `transform_btc_data` é recebido o valor da requisição, é feita a transformação dos dados para o padrão pt-br com adição do carimbo de data/hora, e retorna o valor transformado e pronto para o carregamento
 
-```
-def transform_btc_data(json_data):
-    valor = json_data['amount']
-    criptomoeda = json_data['base']
-    moeda = json_data['currency']
+## Tarefa 2 - transform_btc_data_task
 
-    transformed_value = {
-        'valor': valor,
-        'criptomoeda': criptomoeda,
-        'moeda': moeda,
-        'data_hora': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
+ Uma tarefa com um operador Python em que permite dentro do airflow, realizar codificação Python. No caso da aplicação, foi utilizado para replicar a função transform_btc_data() e refatora-la para se adaptar ao uso do airflow
 
-    return transformed_value
-```
+ - Função transform_btc_data
 
-- Exemplo transformação:
+ ```
+ def transform_btc_data(ti):
+    json_data = ti.xcom_pull(task_ids='extract_btc_data')
+    if json_data:
+        valor = json_data['amount']
+        criptomoeda = json_data['base']
+        moeda = json_data['currency']
 
-```
-{'valor': '95004.715', 'criptomoeda': 'BTC', 'moeda': 'USD', 'timestamp': '2024-12-28 20:42:18'}
-```
+        transformed_value = {
+            'valor': valor,
+            'criptomoeda': criptomoeda,
+            'moeda': moeda,
+            'data_hora': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        return transformed_value
+    raise ValueError('Not found data in xcom for "extract_btc_data" method.')
+ ```
 
- # Terceira Fase do projeto - Carregamento dos dados
+ - Função transform_btc_data_task
 
-  Para a terceira fase, foi criado o método `load_btc_data` que instancia um objeto chamado `mongodb` da classe [MongoDBHandler](mongo_conn.py), responsável pela adição dos dados inseridos dentro do banco mongo.
+ ```
+    transform_btc_data_task = PythonOperator(
+    task_id='transform_btc_data',
+    python_callable=transform_btc_data,
+    provide_context=True,
+    dag=dag
+)
+ ```
 
-```
-def load_btc_data(data):
-    print(data)
-    mongodb = MongoDBHandler()
-    
-    if not data:
-        print('Dados vazio, nada a inserir.')
-        return
-    
-    try:
-        if isinstance(data, list) and len(data) > 1:
-            mongodb.insert_many_data(data)
-        else:
-            mongodb.insert_one_data(data)
-    except Exception as e:
-        print(f'Ocorreu um erro ao tentar carregar os dados: {e}')
-```
+## Tarefa 3 - load_btc_data_task
 
-O método `load_btc_data` verifica se os dados fornecidos estão vazios, exibindo uma mensagem e retornando caso estejam. Se os dados forem uma lista com mais de um item, utiliza o método `insert_many_data` para inserir múltiplos registros no banco; caso contrário, utiliza o método `insert_one_data` para inserir um único registro. Em caso de falha, uma mensagem de erro é exibida com detalhes da exceção.
+Tarefa responsável por carregar os dados dentro do banco.
+ Ela também atua como um operador python, e nesse contexto, a função load_btc_data quem utiliza os módulos auxiliares de criação de tabela, caso não exista, e inserção dos dados transformados
 
-# Quarta Fase do projeto - Execução
-
- Quando executado o projeto, ele efetuará o processo na respectiva ordem:
- - extract_btc_data()
- - transform_btc_data
  - load_btc_data
 
-Ele efetuará essa chamada respectiva chamada a cada 15 em um loop infinito através do bloco `if __name__ == '__main__'`
+ ```
+    def load_btc_data(ti):
+        data = ti.xcom_pull(task_ids='transform_btc_data')
+        if not data:
+            raise ValueError('Not found data in xcom for "load_btc_data" method.')
+        else:
+            try:
+                create_table()
+                insert_data(data)
+            except Exception as e:
+                print(f'An error occurred when trying to load the data:: {e}')
 
+ ```
+
+ Obs: as funções [create_table()](/dags/modules/create_table.py) e [insert_data(data)](/dags//modules/insert_table.py) foram modularizadas, afim de trazer clareza e organização para o código
+ - load_btc_data_task
+
+ ```
+    load_btc_data_task = PythonOperator(
+    task_id='load_btc_data',
+    python_callable=load_btc_data,
+    dag=dag
+)
+ ```
+
+# Segunda fase do projeto - Configuração de conexões no airflow
+
+ Siga os seguintes passos:
+
+ - Ir na área Admin>Connections.
+
+ - Criar conexão com a API Coinbase
+    - `Conn Id` = coinbase_api
+    - `Conn Type` = http
+    - `Host` = https://api.coinbase.com
+
+ - Criar conexão com o Postgres
+    - `Conn Id` = postgres
+    - `Conn Type` = postgres
+    - `Host` = postgres
+    - `Port` = 5432
+
+Obs: essas configurações estão seguindo as configurações feitas no módulo [pipeline.py](/dags/pipeline.py), que acompanha as configurações feitas no [docker-compose.yml](/docker-compose.yaml), então para não ter problemas na execução, executar nessa ordem
+
+# Terceira fase - Definição de precedência da execução
+
+ Dentro do módulo onde foi feita DAG, deve-se definir essa ordem de precedência. 
+    
 ```
-if __name__ == '__main__':
-    while True:
-        #Extract
-        json_data = extract_btc_data()
-        #Transform 
-        processed_data = transform_btc_data(json_data)
-        #Load
-        load_btc_data(processed_data)
-        time.sleep(15)
+extract_btc_data_task >> transform_btc_data_task >> load_btc_data_task
 ```
 
-## Módulo mongo_conn.py
-
-### Funcionalidades principais
-
-### 1 - Conexão com o MongoDB
-
-- Permite conectar a um banco e coleção utilizando configurações dinâmicas definidas por variáveis de ambiente ou parâmetros fornecidos na inicialização.
-- Utiliza a biblioteca `dotenv` para carregar configurações do arquivo `.env`.
-
-
-### 2 - Métodos disponíveis
-- `insert_one_data(document)`: Insere um único documento na coleção.
-- `insert_many_data(documents)`: Insere múltiplos documentos na coleção.
-- `view_data()`: Exibe todos os documentos armazenados na coleção no console.
-- `extract_data()`: Retorna todos os documentos da coleção como um cursor iterável.
-
-
-### 3 - Configuração e Execução
-
-- A classe é configurada para conectar-se ao host e porta definidos em variáveis de ambiente (DB_HOST, MONGO_PORT) ou valores padrão.
-- O banco e a coleção também são configuráveis via variáveis de ambiente (MONGO_DB_NAME, MONGO_DB_COLLECTION).
-
-### Exemplo de uso
-
-```
-# Criando uma instância da classe
-mongo_handler = MongoDBHandler(db_name='btc_database', collection_name='btc_collection')
-
-# Inserindo um único documento
-mongo_handler.insert_one_data({"amount": 3145678.513, "criptcurrency": "BTC", "currency": "USD"})
-
-# Inserindo múltiplos documentos
-mongo_handler.insert_many_data([
-    {"amount": 3145678.513, "criptcurrency": "BTC", "currency": "USD"},
-    {"amount": 4135619.513, "criptcurrency": "BTC", "currency": "USD"}
-])
-
-# Visualizando os documentos da coleção
-mongo_handler.view_data()
-
-# Extraindo os dados da coleção
-data = mongo_handler.extract_data()
-for doc in data:
-    print(doc)
-```
+ O `>>` representa uma sequência lógica e também de padrão em que só será passado para uma nova tarefa, caso a anterior já tenha sido bem sucedida
 
 
 ## Execute o projeto
@@ -180,13 +169,17 @@ for doc in data:
 - Para esse projeto, é necessária as seguintes ferramentas:
 
     - Python 4.7.3
-    - MongoDB 
-    - Docker(opcional)
+    - Docker
 
 
-- Quando copiado o projeto, verifique em sua máquina se a porta 27017 está disponível.
+- Quando copiado o projeto, verifique em sua máquina se a porta 5432 e 8080 estão disponíveis.
 
-- Caso não possua o mongoDB, poderá abrir uma instância do mongoDB através do seu docker.
-    - No diretório raiz, onde contém o arquivo docker-compose.yml, execute o comando `docker-compose up -d`. Ele irá usbir uma instância da sua aplicação e deixará seu terminal livre para executar outros comandos
+- No diretório raiz, onde contém o arquivo docker-compose.yml, execute o comando `docker-compose up -d`, ele irá subir as instâncias dos airflow e do postgres.
+    - Garanta que o postgres será executado, caso não o servidor web do airflow não será executado.
 
-- Após isso pode executar normalmente sua aplicação python
+- Quando executado, acesse o `http://localhost:8080/` para abrir o airflow
+    - Login = `airflow`
+    - Senha = `airflow`
+
+- Assim que entrar, será apresentada apenas uma DAG pausada. Você pode ativa-la e executa-la manualmente para que possa acompanhar o pipeline.
+     - Mantenha caultela pois a DAG está programada para ser executada a cada 15s, então os dados da sua aplicação serão consumidos e armazenados no banco nesse período. Assim que terminar de usar, deve-se pausar a dag novamente ou desligar os serviços através do `docker-compose down`
